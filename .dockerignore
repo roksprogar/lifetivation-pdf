@@ -1,0 +1,11 @@
+# Ignore Rust build artifacts
+target/
+.cargo/
+**/*.rs.bk
+
+# Ignore git
+.git/
+.gitignore
+
+# Env files
+.env*

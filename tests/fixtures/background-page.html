@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    @page { size: A4; margin: 50pt }
+    @page full { background-color: #20303a; background-image: url("bg.png"); background-size: cover }
+    body { margin: 0; font-size: 14pt; line-height: 1.5 }
+    p { margin: 0 0 12pt }
+    section.full { page: full; color: #ffffff }
+</style>
+</head>
+<body>
+<p>Before the background page. This paragraph sits on an ordinary page with ordinary margins, and it is long enough to wrap onto a second line.</p>
+<p>A second short paragraph on the first page.</p>
+<section class="full">
+<p>On the background page. This paragraph sits over a full page image, yet it keeps the same margins, width and line breaking as the paragraphs on the pages around it.</p>
+<p>A second paragraph over the image.</p>
+</section>
+<p>After the background page. This paragraph sits on an ordinary page with ordinary margins, and it is long enough to wrap onto a second line.</p>
+</body>
+</html>
