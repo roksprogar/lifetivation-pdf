@@ -745,8 +745,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn m1_spans_three_pages_and_keeps_every_line_in_order() {
-        let html = fixture("m1.html");
+    fn spans_three_pages_and_keeps_every_line_in_order() {
+        let html = fixture("paragraphs.html");
         let document = lay_out(&html);
         assert_eq!(document.pages.len(), 3);
 
@@ -768,7 +768,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_paragraph_splits_between_lines_across_a_page_break() {
-        let document = lay_out(&fixture("m1.html"));
+        let document = lay_out(&fixture("paragraphs.html"));
         let split = document.pages.windows(2).any(|pair| {
             let last = pair[0].lines.last().unwrap();
             let first = pair[1].lines.first().unwrap();
@@ -782,7 +782,7 @@ pub(crate) mod tests {
 
     #[test]
     fn nothing_crosses_the_margins() {
-        let document = lay_out(&fixture("m1.html"));
+        let document = lay_out(&fixture("paragraphs.html"));
         for page in &document.pages {
             let style = &page.style;
             let (left, right) = (style.margin.left, style.width - style.margin.right);
@@ -809,7 +809,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_wrapped_link_gets_one_area_per_line() {
-        let document = lay_out(&fixture("m1.html"));
+        let document = lay_out(&fixture("paragraphs.html"));
         let areas: Vec<&LinkArea> = document
             .pages
             .iter()

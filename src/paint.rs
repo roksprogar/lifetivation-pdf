@@ -271,7 +271,7 @@ mod tests {
     /// overlaps, so PDF text extraction reproduces the source text exactly.
     #[test]
     fn glyph_text_ranges_cover_each_line_exactly() {
-        let document = lay_out(&fixture("m1.html"));
+        let document = lay_out(&fixture("paragraphs.html"));
         let mut ligatures = 0;
 
         for placed in document.pages.iter().flat_map(|page| &page.lines) {

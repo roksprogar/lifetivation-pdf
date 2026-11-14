@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         # The declared rust-version, and the latest stable.
-        toolchain: ["1.91", stable]
+        toolchain: ["1.92", stable]
 
     steps:
     - uses: actions/checkout@v4

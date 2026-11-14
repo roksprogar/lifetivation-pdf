@@ -127,13 +127,19 @@ fn image_count(doc: &Document, page_id: ObjectId) -> usize {
             })
             .sum()
     }
-    let (resources, _) = doc.get_page_resources(page_id).unwrap();
-    resources.map_or(0, |r| count(doc, r))
+    // A page's resources can be inline or an indirect reference (krilla writes a reference).
+    let (inline, referenced) = doc.get_page_resources(page_id).unwrap();
+    inline.map_or(0, |r| count(doc, r))
+        + referenced
+            .iter()
+            .map(|id| count(doc, doc.get_dictionary(*id).unwrap()))
+            .sum::<usize>()
 }
 
 #[test]
-fn m1_renders_three_a4_pages() {
-    let doc = load(&render(&fixture("m1.html"), &config(), no_images).expect("render succeeds"));
+fn renders_three_a4_pages() {
+    let doc =
+        load(&render(&fixture("paragraphs.html"), &config(), no_images).expect("render succeeds"));
     let pages = doc.get_pages();
     assert_eq!(pages.len(), 3);
     for page_id in pages.values() {
@@ -144,7 +150,7 @@ fn m1_renders_three_a4_pages() {
 
 #[test]
 fn links_are_clickable_annotations_inside_the_margins() {
-    let doc = load(&render(&fixture("m1.html"), &config(), no_images).unwrap());
+    let doc = load(&render(&fixture("paragraphs.html"), &config(), no_images).unwrap());
     let all: Vec<(String, [f32; 4])> = doc
         .get_pages()
         .values()
@@ -162,7 +168,7 @@ fn links_are_clickable_annotations_inside_the_margins() {
     assert_eq!(wrapped, 2, "the wrapped link has one annotation per line");
     assert_eq!(short, 1);
 
-    // m1.html: A4 with a 37.5pt margin.
+    // paragraphs.html: A4 with a 37.5pt margin.
     let (left, right, bottom, top) = (37.5, 595.28 - 37.5, 37.5, 841.89 - 37.5);
     for (uri, [x0, y0, x1, y1]) in &all {
         assert!(x0 < x1 && y0 < y1, "{uri}: empty rect");

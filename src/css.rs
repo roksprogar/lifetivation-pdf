@@ -303,7 +303,7 @@ pub(crate) fn expand(declaration: &Declaration, specified: &mut Specified) {
         return;
     }
     if name == "page-break-after" || name == "page-break-before" {
-        // Accepted and ignored until a document needs forced breaks.
+        // Accepted and ignored: only a change of `page` name forces a break.
         return;
     }
     specified.insert(declaration.name.clone(), declaration.value.clone());

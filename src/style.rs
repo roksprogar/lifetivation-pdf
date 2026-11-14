@@ -163,8 +163,8 @@ impl Style {
 
         let points = |name: &str| match get(name).and_then(|v| css::length(v, font_size)) {
             Some(Length::Points(points)) => points,
-            // Percent margins and padding resolve against the containing block's width, which
-            // isn't known here; no document needs them yet.
+            // Percent margins and padding would resolve against the containing block's width,
+            // which isn't known here, so they compute to 0.
             _ => 0.0,
         };
         style.margin = Sides {

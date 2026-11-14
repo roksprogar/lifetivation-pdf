@@ -2,8 +2,8 @@
 name = "lifetivation-pdf"
 version = "0.1.0"
 edition = "2021"
-# krilla is pinned to 0.7 for this; 0.8 needs 1.92.
-rust-version = "1.91"
+# krilla 0.8 needs 1.92.
+rust-version = "1.92"
 description = "HTML/CSS to PDF rendering in pure Rust, built for paged media."
 license = "MIT"
 repository = "https://github.com/roksprogar/lifetivation-pdf"
@@ -18,8 +18,7 @@ include = ["src/**/*", "LICENSE", "README.md"]
 html5ever = "=0.40.1"
 markup5ever_rcdom = "=0.40.1"
 parley = { version = "=0.12.0", default-features = false, features = ["std"] }
-# 0.7: krilla 0.8 needs rustc 1.92, above this crate's rust-version.
-krilla = { version = "=0.7.0", default-features = false, features = ["raster-images"] }
+krilla = { version = "=0.8.2", default-features = false, features = ["raster-images"] }
 
 [dev-dependencies]
 lopdf = "0.38"
