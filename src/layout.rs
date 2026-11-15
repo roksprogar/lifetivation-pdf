@@ -12,14 +12,14 @@ use std::sync::Arc;
 
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontWeight, Layout,
-    LayoutContext, Line, StyleProperty, YieldData,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
+    Layout, LayoutContext, Line, StyleProperty, YieldData,
 };
 
 use crate::css::{self, Length, Stylesheet};
 use crate::dom::{Block, Link, Paragraph};
 use crate::images::Images;
-use crate::style::{self, LineHeight, TextStyle};
+use crate::style::{self, LineHeight, TextAlign, TextStyle};
 use crate::{Error, Rgb};
 
 /// Per-span style carried through parley.
@@ -70,8 +70,12 @@ impl PageStyle {
                 Some(length) => style::resolve(length, width),
                 None => 0.0,
             };
-        let background_image = get("background-image").filter(|v| *v != "none");
-        if background_image.is_some() && get("background-size").unwrap_or("auto") != "cover" {
+        let background_image = get("background-image").filter(|v| !v.eq_ignore_ascii_case("none"));
+        if background_image.is_some()
+            && !get("background-size")
+                .unwrap_or("auto")
+                .eq_ignore_ascii_case("cover")
+        {
             return Err(Error::Unsupported(
                 "page background images without background-size: cover".into(),
             ));
@@ -505,7 +509,15 @@ impl Flow<'_, '_> {
             }
         }
         breaker.finish();
-        layout.align(Alignment::Start, AlignmentOptions::default());
+        let alignment = match paragraph.style.text_align {
+            TextAlign::Start => Alignment::Start,
+            TextAlign::End => Alignment::End,
+            TextAlign::Left => Alignment::Left,
+            TextAlign::Right => Alignment::Right,
+            TextAlign::Center => Alignment::Center,
+            TextAlign::Justify => Alignment::Justify,
+        };
+        layout.align(alignment, AlignmentOptions::default());
 
         let laid_out = ParagraphLayout {
             text: paragraph.text.clone(),
@@ -570,7 +582,14 @@ impl Flow<'_, '_> {
             self.new_page(name.as_deref())?;
             self.pages.last_mut().expect("current page").used = true;
         }
-        let left = self.page().style.margin.left + inset.left + style.margin.left;
+        // `text-align` of the image's line (set in dom), within the space beside its margins.
+        let free = (available - width).max(0.0);
+        let offset = match style.text_align {
+            TextAlign::Center => free / 2.0,
+            TextAlign::Right | TextAlign::End => free,
+            TextAlign::Start | TextAlign::Left | TextAlign::Justify => 0.0,
+        };
+        let left = self.page().style.margin.left + inset.left + style.margin.left + offset;
         let top = self.cursor;
         self.pages
             .last_mut()
@@ -612,6 +631,11 @@ fn push_text_style(
         StyleProperty::FontFamily(FontFamily::from(FontFamilyName::Named(family.into()))),
         StyleProperty::FontSize(style.font_size),
         StyleProperty::FontWeight(FontWeight::new(style.font_weight)),
+        StyleProperty::FontStyle(match style.font_style {
+            style::FontStyle::Normal => FontStyle::Normal,
+            style::FontStyle::Italic => FontStyle::Italic,
+            style::FontStyle::Oblique(angle) => FontStyle::Oblique(angle),
+        }),
         StyleProperty::LineHeight(line_height),
         StyleProperty::Brush(brush(style, None)),
     ];
@@ -680,9 +704,13 @@ pub(crate) mod tests {
     use crate::{css, dom};
 
     pub(crate) fn font() -> Vec<u8> {
-        std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/DejaVuSerif.ttf"
+        font_file("DejaVuSerif.ttf")
+    }
+
+    pub(crate) fn font_file(name: &str) -> Vec<u8> {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
         ))
         .expect("test font")
     }
@@ -697,7 +725,15 @@ pub(crate) mod tests {
 
     /// Lays out `html` with images of the given (src, width, height) sizes in px.
     pub(crate) fn lay_out_with(html: &str, images: &[(&str, u32, u32)]) -> DocumentLayout {
-        let mut fonts = Fonts::new(&[font()]).unwrap();
+        lay_out_with_fonts(html, images, &[font()])
+    }
+
+    pub(crate) fn lay_out_with_fonts(
+        html: &str,
+        images: &[(&str, u32, u32)],
+        fonts: &[Vec<u8>],
+    ) -> DocumentLayout {
+        let mut fonts = Fonts::new(fonts).unwrap();
         let ua = Stylesheet::parse(css::USER_AGENT);
         let document = dom::parse(html, &ua, fonts.default_family()).unwrap();
         let mut load = |src: &str| {
@@ -905,6 +941,166 @@ pub(crate) mod tests {
             document.pages[1].lines[0].top, 0.0,
             "the next paragraph starts page 2"
         );
+    }
+
+    #[test]
+    fn headings_stack_with_their_sizes_and_collapsed_margins() {
+        let document = lay_out(&fixture("headings.html"));
+        assert_eq!(document.pages.len(), 1);
+        let lines = &document.pages[0].lines;
+        assert_eq!(lines.len(), 12, "six headings and six one-line paragraphs");
+        let heights: Vec<f32> = lines.iter().map(|l| l.bottom - l.top).collect();
+        // Line heights follow font size: h1 > h2 > h3 > h4 (= body) > h5 > h6.
+        let heading_heights: Vec<f32> = heights.iter().step_by(2).copied().collect();
+        assert!(
+            heading_heights.windows(2).all(|pair| pair[0] > pair[1]),
+            "{heading_heights:?}"
+        );
+        assert!(
+            (heading_heights[3] - heights[1]).abs() < 0.01,
+            "h4 is body-sized"
+        );
+        assert_eq!(
+            lines[0].top, 50.0,
+            "h1's top margin truncates at the page top"
+        );
+        // Body is 12pt and p's margin is 12pt. Every heading's own margin (size × margin em) is
+        // larger, so it alone separates the heading from the paragraphs on both sides.
+        let sizes_and_margins = [
+            (2.0, 0.67),
+            (1.5, 0.83),
+            (1.17, 1.0),
+            (1.0, 1.33),
+            (0.83, 1.67),
+            (0.67, 2.33),
+        ];
+        for (index, (size_em, margin_em)) in sizes_and_margins.into_iter().enumerate() {
+            let margin = 12.0 * size_em * margin_em;
+            let (heading, after) = (lines[2 * index], lines[2 * index + 1]);
+            assert!(
+                (after.top - heading.bottom - margin).abs() < 0.01,
+                "below h{}",
+                index + 1
+            );
+            if index > 0 {
+                let before = lines[2 * index - 1];
+                assert!(
+                    (heading.top - before.bottom - margin).abs() < 0.01,
+                    "above h{}",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn style_attributes_place_boxes_like_stylesheet_rules() {
+        let document = lay_out_with(&fixture("inline-style.html"), &[("a.png", 80, 40)]);
+        let page = &document.pages[0];
+        let tops: Vec<f32> = page.lines.iter().map(|l| l.top).collect();
+        // The lead's 10pt top margin truncates at the page top; its 20pt bottom margin stays.
+        assert_eq!(tops, [50.0, 50.0 + 20.0 + 20.0]);
+        let image = &page.images[0];
+        assert_eq!((image.left, image.top), (50.0 + 10.0, 90.0 + 20.0));
+        assert_eq!(
+            (image.width, image.height),
+            (45.0, 22.5),
+            "60px wide, ratio kept"
+        );
+    }
+
+    #[test]
+    fn text_align_places_each_line_like_a_browser() {
+        let document = lay_out(&fixture("text-align.html"));
+        assert_eq!(document.pages.len(), 1);
+        let page = &document.pages[0];
+        let (left, right) = (40.0, 419.53 - 40.0);
+        let lines: Vec<(String, f32, f32)> = page
+            .lines
+            .iter()
+            .map(|placed| {
+                let (ink_left, ink_right) = ink_extent(&document, placed);
+                (line_text(&document, placed), ink_left, ink_right)
+            })
+            .collect();
+        let find = |start: &str| {
+            lines
+                .iter()
+                .find(|(text, ..)| text.starts_with(start))
+                .unwrap_or_else(|| panic!("no line starting {start:?}"))
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+
+        let (_, l, r) = find("Start-aligned");
+        assert!(near(*l, left) && *r < right - 50.0);
+        for start in ["A centred", "Centred by inheritance"] {
+            let (_, l, r) = find(start);
+            assert!(near(l - left, right - r), "{start}: {l} {r}");
+            assert!(*l > left + 50.0);
+        }
+        for start in ["A right-aligned", "Right-aligned by a style"] {
+            let (_, l, r) = find(start);
+            assert!(near(*r, right) && *l > left + 50.0, "{start}: {l} {r}");
+        }
+
+        // Justified lines fill the width; a line ending in <br> and a paragraph's last line keep
+        // their natural spacing, start-aligned.
+        let justified: Vec<&(String, f32, f32)> = lines
+            .iter()
+            .skip_while(|(text, ..)| !text.starts_with("A justified"))
+            .collect();
+        let mut stretched = 0;
+        for (index, (text, l, r)) in justified.iter().enumerate() {
+            assert!(near(*l, left), "{text:?} starts at the margin");
+            let last_of_paragraph = justified
+                .get(index + 1)
+                .is_none_or(|(next, ..)| next.starts_with("Justified "));
+            if text.ends_with('\n') || last_of_paragraph {
+                assert!(*r < right - 20.0, "{text:?} is not stretched");
+            } else {
+                assert!(near(*r, right), "{text:?} reaches the right margin: {r}");
+                stretched += 1;
+            }
+        }
+        assert!(
+            stretched >= 4,
+            "the fixture should stretch several lines: {stretched}"
+        );
+
+        // Link areas follow the stretched words.
+        for area in &page.links {
+            let line = page.lines.iter().find(|l| l.top == area.top).unwrap();
+            let (l, r) = ink_extent(&document, line);
+            assert!(area.left >= l - 0.01 && area.right <= r + 0.01);
+        }
+        assert!(page.links.len() >= 2, "the justified link wraps");
+    }
+
+    #[test]
+    fn images_follow_the_text_align_of_their_line() {
+        let document = lay_out_with(
+            "<style>@page { size: A4; margin: 50pt } body { margin: 0 }
+             .block { display: block }</style>
+             <div style=\"text-align: center\"><img src=\"a.png\"></div>
+             <div style=\"text-align: right\"><img style=\"margin-right: 10pt\" src=\"a.png\"></div>
+             <div style=\"text-align: justify\"><img src=\"a.png\"></div>
+             <div style=\"text-align: center\"><img class=\"block\" src=\"a.png\"></div>
+             <div style=\"text-align: center\"><img src=\"wide.png\"></div>",
+            &[("a.png", 200, 100), ("wide.png", 2000, 100)],
+        );
+        let lefts: Vec<f32> = document.pages[0].images.iter().map(|i| i.left).collect();
+        let content = 595.28 - 100.0;
+        let width = 150.0; // 200px
+        let expected = [
+            50.0 + (content - width) / 2.0,
+            50.0 + content - 10.0 - width,
+            50.0,
+            50.0, // a block image is a box; text-align doesn't move it
+            50.0, // wider than the line: it overflows to the right from the start
+        ];
+        for (left, expected) in lefts.iter().zip(expected) {
+            assert!((left - expected).abs() < 0.01, "{lefts:?} vs {expected}");
+        }
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! HTML/CSS to PDF rendering in pure Rust, built for paged media.
 //!
 //! Supported so far: block layout with collapsing margins and padding; paragraphs with styled
-//! text, `<br>` line breaks and clickable `<a href>` links; PNG images; CSS from `<style>` elements with compound
-//! selectors; `@page` size, margins and backgrounds, including named pages (`page: name`).
-//! An element outside that set, or an attribute that would change its rendering (`style`,
-//! `align`, ...), is reported as [`Error::Unsupported`] instead of rendering wrong; unsupported CSS
-//! in stylesheets is ignored.
+//! text, `<br>` line breaks and clickable `<a href>` links; PNG images; CSS from `<style>`
+//! elements and `style` attributes, with compound selectors; `@page` size, margins and
+//! backgrounds, including named pages (`page: name`).
+//! An element outside that set, or an attribute that would change its rendering (`align`,
+//! `width`, ...), is reported as [`Error::Unsupported`] instead of rendering wrong, as is a `style`
+//! attribute declaration it can't render. Unsupported CSS in `<style>` elements is ignored.
 
 mod css;
 mod dom;
@@ -25,7 +26,12 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 #[non_exhaustive]
 pub struct Config {
     /// Font files (TTF/OTF). CSS `font-family` names match their family names; the first font's
-    /// family is the default for text without a matching family. No system fonts are used.
+    /// family is the default for text without a matching family. Faces of one family (regular,
+    /// bold, italic) are matched by weight and style; bold or italic text in a family without
+    /// that face is synthesized: bold when the nearest face is more than 200 lighter (so `bold` on
+    /// a regular face, but not `600`), italic when there is no italic face. Variable fonts draw
+    /// their default instance only, so give each weight and style as its own static font file.
+    /// No system fonts are used.
     pub fonts: Vec<Vec<u8>>,
 }
 
@@ -47,7 +53,7 @@ pub enum Error {
     /// The margins leave no room for content on the page.
     NoContentArea,
     /// The document needs a feature this version doesn't support yet, such as an element
-    /// (`<ul>`, `<strong>`) it can't render correctly.
+    /// (`<ul>`, `<table>`) it can't render correctly.
     Unsupported(String),
     /// The PDF writer rejected the document.
     Pdf(String),

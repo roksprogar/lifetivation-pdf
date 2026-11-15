@@ -1,6 +1,6 @@
 [package]
 name = "lifetivation-pdf"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # krilla 0.8 needs 1.92.
 rust-version = "1.92"

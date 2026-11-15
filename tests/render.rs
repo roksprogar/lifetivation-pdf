@@ -242,6 +242,95 @@ fn the_html_title_becomes_the_pdf_title() {
     assert_eq!(text, "A guide & more");
 }
 
+/// Embedded font programs: one per face the document draws with.
+fn embedded_fonts(doc: &Document) -> usize {
+    doc.objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .filter(|dict| dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"FontDescriptor"))
+        .count()
+}
+
+/// Text rendering modes (`Tr`) set anywhere in the page contents; 2 is fill then stroke.
+fn text_render_modes(doc: &Document) -> Vec<i64> {
+    doc.get_pages()
+        .values()
+        .flat_map(|page_id| {
+            doc.get_and_decode_page_content(*page_id)
+                .unwrap()
+                .operations
+        })
+        .filter(|op| op.operator == "Tr")
+        .map(|op| op.operands[0].as_i64().unwrap())
+        .collect()
+}
+
+#[test]
+fn bold_text_embeds_the_bold_face() {
+    let fonts = Config::new(vec![
+        std::fs::read(format!("{FIXTURES}/DejaVuSerif.ttf")).unwrap(),
+        std::fs::read(format!("{FIXTURES}/DejaVuSerif-Bold.ttf")).unwrap(),
+    ]);
+    let doc = load(&render(&fixture("bold.html"), &fonts, no_images).unwrap());
+    assert_eq!(embedded_fonts(&doc), 2, "regular and bold");
+    assert!(
+        !text_render_modes(&doc).contains(&2),
+        "real bold is not stroked"
+    );
+}
+
+#[test]
+fn bold_text_is_stroked_without_a_bold_face() {
+    let doc = load(&render(&fixture("bold.html"), &config(), no_images).unwrap());
+    assert_eq!(embedded_fonts(&doc), 1, "the regular face only");
+    assert!(
+        text_render_modes(&doc).contains(&2),
+        "synthesized bold fills and strokes the glyphs"
+    );
+}
+
+fn faces(names: &[&str]) -> Config {
+    Config::new(
+        names
+            .iter()
+            .map(|name| std::fs::read(format!("{FIXTURES}/{name}")).unwrap())
+            .collect(),
+    )
+}
+
+/// Transforms (`cm`) in the page contents that skew x by y, as a synthesized italic does.
+fn skews(doc: &Document) -> usize {
+    doc.get_pages()
+        .values()
+        .flat_map(|page_id| {
+            doc.get_and_decode_page_content(*page_id)
+                .unwrap()
+                .operations
+        })
+        .filter(|op| op.operator == "cm" && number(&op.operands[2]) != 0.0)
+        .count()
+}
+
+#[test]
+fn italic_text_embeds_the_italic_faces() {
+    let config = faces(&[
+        "DejaVuSerif.ttf",
+        "DejaVuSerif-Bold.ttf",
+        "DejaVuSerif-Italic.ttf",
+        "DejaVuSerif-BoldItalic.ttf",
+    ]);
+    let doc = load(&render(&fixture("italic.html"), &config, no_images).unwrap());
+    assert_eq!(embedded_fonts(&doc), 3, "regular, italic and bold italic");
+    assert_eq!(skews(&doc), 0, "real italics are not slanted");
+}
+
+#[test]
+fn italic_text_is_slanted_without_italic_faces() {
+    let doc = load(&render(&fixture("italic.html"), &config(), no_images).unwrap());
+    assert_eq!(embedded_fonts(&doc), 1, "the regular face only");
+    assert_eq!(skews(&doc), 4, "emphasis, italic, bold italic and the link");
+}
+
 #[test]
 fn a_missing_image_is_an_error() {
     let result = render(&fixture("background-page.html"), &config(), no_images);

@@ -11,7 +11,7 @@ use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::css::{self, Stylesheet};
-use crate::style::{Display, Style, TextStyle};
+use crate::style::{self, Display, Style, TextAlign, TextStyle};
 use crate::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,15 +140,15 @@ fn attribute(node: &Handle, attribute: &str) -> Option<String> {
 
 /// Elements this crate renders the way a browser would. Any other element that is displayed fails
 /// the render, so the document can't silently come out wrong: `<li>` items would run into one
-/// paragraph, `<strong>` would be regular weight. Hidden elements
+/// paragraph, `<table>` cells would run together. Hidden elements
 /// (`display: none`, like `<head>` and `<script>`) are never checked.
 const SUPPORTED_ELEMENTS: &[&str] = &[
     "html", "body", "div", "section", "article", "header", "footer", "main", "nav", "aside", "p",
-    "h1", "h2", "span", "a", "img", "br",
+    "h1", "h2", "h3", "h4", "h5", "h6", "span", "a", "b", "strong", "i", "em", "img", "br",
 ];
 
 /// Attributes that change how an element renders, which this crate doesn't read.
-const UNSUPPORTED_ATTRIBUTES: &[&str] = &["style", "align", "width", "height", "dir"];
+const UNSUPPORTED_ATTRIBUTES: &[&str] = &["align", "width", "height", "dir"];
 
 fn check_supported(node: &Handle) -> Result<(), Error> {
     let NodeData::Element { name, attrs, .. } = &node.data else {
@@ -171,6 +171,36 @@ fn check_supported(node: &Handle) -> Result<(), Error> {
     Ok(())
 }
 
+/// A `style` attribute is written for one element, so a declaration in it that this crate can't
+/// render (`display: flex`, `background-color`, a malformed one) fails the render instead of being
+/// dropped. Stylesheets are shared across documents and keep ignoring unsupported CSS.
+fn check_style_attribute(
+    tag: &str,
+    display: Display,
+    source: &str,
+    declarations: &[css::Declaration],
+) -> Result<(), Error> {
+    let unsupported = |what: &str| {
+        Err(Error::Unsupported(format!(
+            "`{what}` in the style attribute on <{tag}>"
+        )))
+    };
+    if let Some(malformed) = source
+        .split(';')
+        .map(str::trim)
+        .find(|piece| !piece.is_empty() && !piece.contains(':'))
+    {
+        return unsupported(malformed);
+    }
+    match declarations
+        .iter()
+        .find(|d| !style::renders(tag, display, &d.name, &d.value))
+    {
+        Some(declaration) => unsupported(&format!("{}: {}", declaration.name, declaration.value)),
+        None => Ok(()),
+    }
+}
+
 struct TreeBuilder<'a> {
     sheets: [&'a Stylesheet; 2],
 }
@@ -182,10 +212,19 @@ impl TreeBuilder<'_> {
         let id = attribute(node, "id");
         let class = attribute(node, "class").unwrap_or_default();
         let classes: Vec<&str> = class.split_whitespace().collect();
-        let specified = css::cascade(&self.sheets, tag, id.as_deref(), &classes);
+        let inline = attribute(node, "style").unwrap_or_default();
+        let inline_declarations = css::declarations(&inline);
+        let specified = css::cascade(
+            &self.sheets,
+            tag,
+            id.as_deref(),
+            &classes,
+            &inline_declarations,
+        );
         let style = Style::compute(parent, &specified);
         if style.display != Display::None {
             check_supported(node)?;
+            check_style_attribute(tag, style.display, &inline, &inline_declarations)?;
         }
         Ok(style)
     }
@@ -236,8 +275,18 @@ impl TreeBuilder<'_> {
                                 ));
                             }
                             let src = attribute(child, "src").unwrap_or_default();
+                            // An inline image sits on its own line, aligned by its container's
+                            // `text-align`, as browsers align a line holding only the image. A block
+                            // image is a box, which `text-align` doesn't move.
+                            let text_align = match child_style.display {
+                                Display::Block => TextAlign::Start,
+                                _ => style.text_align,
+                            };
                             children.push(Block::Image {
-                                style: child_style,
+                                style: Style {
+                                    text_align,
+                                    ..child_style
+                                },
                                 src,
                             });
                             inline.after_image = true;
@@ -323,9 +372,9 @@ struct ParagraphBuilder {
     text: String,
     spans: Vec<Span>,
     links: Vec<Link>,
-    /// A collapsible space is pending; it is written only if more text follows, in the style of
-    /// that text.
-    pending_space: bool,
+    /// A collapsible space is pending, in the style of the text it came from (the first space of
+    /// a collapsed run, as in CSS); it is written only if more text follows on the line.
+    pending_space: Option<TextStyle>,
     /// An image block was emitted from this inline context; text may not follow on its line.
     after_image: bool,
 }
@@ -337,7 +386,7 @@ impl ParagraphBuilder {
             text: String::new(),
             spans: Vec::new(),
             links: Vec::new(),
-            pending_space: false,
+            pending_space: None,
             after_image: false,
         }
     }
@@ -350,16 +399,18 @@ impl ParagraphBuilder {
         for ch in raw.chars() {
             if ch.is_ascii_whitespace() {
                 // Whitespace collapses into one space, and disappears at the start of a line.
-                self.pending_space = !self.text.is_empty() && !self.text.ends_with([' ', '\n']);
+                if self.pending_space.is_none()
+                    && !self.text.is_empty()
+                    && !self.text.ends_with([' ', '\n'])
+                {
+                    self.pending_space = Some(style.clone());
+                }
                 continue;
             }
             if self.after_image {
                 return Err(Error::Unsupported("images on a line with text".into()));
             }
-            if self.pending_space {
-                self.push_char(' ', style);
-                self.pending_space = false;
-            }
+            self.flush_pending_space();
             self.push_char(ch, style);
         }
         Ok(())
@@ -368,7 +419,7 @@ impl ParagraphBuilder {
     /// `<br>`: a forced line break. A pending space before it is dropped, as at any line end.
     /// Right after an image block it only ends the image's line, so text may follow.
     fn line_break(&mut self, style: &TextStyle) {
-        self.pending_space = false;
+        self.pending_space = None;
         if self.after_image && self.text.is_empty() {
             self.after_image = false;
             return;
@@ -381,15 +432,8 @@ impl ParagraphBuilder {
     }
 
     fn flush_pending_space(&mut self) {
-        if self.pending_space {
-            let style = self
-                .spans
-                .last()
-                .expect("a pending space follows text")
-                .style
-                .clone();
+        if let Some(style) = self.pending_space.take() {
             self.push_char(' ', &style);
-            self.pending_space = false;
         }
     }
 
@@ -561,19 +605,256 @@ mod tests {
             unsupported("<ul><li>a</li><li>b</li></ul>"),
             "the <ul> element"
         );
+        assert_eq!(unsupported("<p>a <u>b</u></p>"), "the <u> element");
         assert_eq!(
-            unsupported("<p>a <strong>b</strong></p>"),
-            "the <strong> element"
-        );
-        assert_eq!(unsupported("<h3>Title</h3>"), "the <h3> element");
-        assert_eq!(
-            unsupported("<p style=\"text-align: center\">a</p>"),
-            "the style attribute on <p>"
+            unsupported("<p align=\"center\">a</p>"),
+            "the align attribute on <p>"
         );
         assert_eq!(
             unsupported("<img src=\"a.png\" width=\"300\">"),
             "the width attribute on <img>"
         );
+    }
+
+    #[test]
+    fn i_and_em_are_italic_spans_and_font_style_inherits() {
+        use crate::style::FontStyle;
+        let blocks = parse_body(
+            "<style>.o { font-style: oblique 10deg } .n { font-style: normal }</style>
+             <p>a <i>b</i> <em>c <b>d</b> <span class=\"n\">e</span></em> <span class=\"o\">f</span></p>",
+        );
+        let p = paragraph(&blocks[0]);
+        let styles: Vec<(&str, FontStyle, f32)> = p
+            .spans
+            .iter()
+            .map(|s| {
+                (
+                    &p.text[s.range.clone()],
+                    s.style.font_style,
+                    s.style.font_weight,
+                )
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            [
+                ("a ", FontStyle::Normal, 400.0),
+                ("b", FontStyle::Italic, 400.0),
+                (" ", FontStyle::Normal, 400.0),
+                ("c ", FontStyle::Italic, 400.0),
+                ("d", FontStyle::Italic, 700.0),
+                (" ", FontStyle::Italic, 400.0),
+                ("e ", FontStyle::Normal, 400.0),
+                ("f", FontStyle::Oblique(Some(10.0)), 400.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn b_and_strong_are_bold_spans() {
+        let blocks = parse_body("<p>plain <b>bee</b> and <strong>strong</strong> end</p>");
+        let p = paragraph(&blocks[0]);
+        let weights: Vec<(&str, f32)> = p
+            .spans
+            .iter()
+            .map(|s| (&p.text[s.range.clone()], s.style.font_weight))
+            .collect();
+        assert_eq!(
+            weights,
+            [
+                ("plain ", 400.0),
+                ("bee", 700.0),
+                (" and ", 400.0),
+                ("strong", 700.0),
+                (" end", 400.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn headings_get_browser_sizes_and_margins() {
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/headings.html"
+        ))
+        .expect("fixture");
+        let headings: Vec<(f32, f32)> = parse_body(&html)
+            .iter()
+            .map(paragraph)
+            .filter(|p| p.text.starts_with("Heading"))
+            .map(|p| {
+                let style = &p.style;
+                assert_eq!(style.text.font_weight, 700.0, "{} is bold", p.text);
+                assert_eq!(style.margin.top, style.margin.bottom);
+                (style.text.font_size, style.margin.top)
+            })
+            .collect();
+        // body is 16px = 12pt; sizes and margins in em as browsers set them.
+        let expected = [
+            (2.0, 0.67),
+            (1.5, 0.83),
+            (1.17, 1.0),
+            (1.0, 1.33),
+            (0.83, 1.67),
+            (0.67, 2.33),
+        ];
+        assert_eq!(headings.len(), expected.len());
+        for ((size, margin), (em, margin_em)) in headings.iter().zip(expected) {
+            assert!((size - 12.0 * em).abs() < 0.001, "{size} vs {em}em");
+            assert!(
+                (margin - size * margin_em).abs() < 0.001,
+                "{margin} vs {margin_em}em"
+            );
+        }
+    }
+
+    #[test]
+    fn a_style_attribute_outranks_every_stylesheet_rule() {
+        use crate::style::FontStyle;
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/inline-style.html"
+        ))
+        .expect("fixture");
+        let blocks = parse_body(&html);
+        assert_eq!(
+            blocks.len(),
+            3,
+            "the display: none div is dropped: {blocks:?}"
+        );
+
+        let lead = paragraph(&blocks[0]);
+        assert_eq!(lead.style.text.color, crate::Rgb(255, 0, 0));
+        assert_eq!(
+            (lead.style.margin.top, lead.style.margin.bottom),
+            (10.0, 20.0)
+        );
+
+        let plain = paragraph(&blocks[1]);
+        let styled = plain
+            .spans
+            .iter()
+            .find(|s| &plain.text[s.range.clone()] == "styled")
+            .unwrap();
+        assert_eq!(
+            (styled.style.font_weight, styled.style.font_style),
+            (700.0, FontStyle::Italic)
+        );
+        assert_eq!(
+            styled.style.color,
+            crate::Rgb(0, 0, 255),
+            "colour still inherits"
+        );
+
+        let Block::Image { style, .. } = &blocks[2] else {
+            panic!("an image block")
+        };
+        assert_eq!(style.width, Some(css::Length::Points(45.0)));
+        assert_eq!(style.margin.left, 10.0);
+    }
+
+    #[test]
+    fn style_attribute_declarations_it_cannot_render_fail_naming_them() {
+        let cases = [
+            (
+                "<div style=\"display: flex\">a</div>",
+                "`display: flex` in the style attribute on <div>",
+            ),
+            (
+                "<p style=\"background-color: yellow\">a</p>",
+                "`background-color: yellow` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"color: red; text-indent: 2em\">a</p>",
+                "`text-indent: 2em` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"color red\">a</p>",
+                "`color red` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"color: rgba(0, 0, 0, 0.5)\">a</p>",
+                "`color: rgba(0, 0, 0, 0.5)` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"text-decoration: underline red\">a</p>",
+                "`text-decoration: underline red` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"margin: 10%\">a</p>",
+                "`margin: 10%` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"width: 50%\">a</p>",
+                "`width: 50%` in the style attribute on <p>",
+            ),
+            (
+                "<p style=\"page-break-before: always\">a</p>",
+                "`page-break-before: always` in the style attribute on <p>",
+            ),
+            (
+                "<p>a <span style=\"margin-left: 10px\">b</span></p>",
+                "`margin-left: 10px` in the style attribute on <span>",
+            ),
+            (
+                "<img style=\"padding: 4px\" src=\"a.png\">",
+                "`padding: 4px` in the style attribute on <img>",
+            ),
+        ];
+        for (html, expected) in cases {
+            assert_eq!(unsupported(html), expected, "{html}");
+        }
+    }
+
+    #[test]
+    fn style_attribute_declarations_it_renders_pass() {
+        let blocks = parse_body(
+            "<p style=\"\">empty</p>
+             <p style=\"color: #ff0000; font: ; \">trailing semicolons</p>
+             <div style=\"display: block; margin: 1px 2px 3px; padding-top: 4pt; text-align: justify;
+                          font-family: 'DejaVu Serif', serif; font-size: 120%; font-weight: 600;
+                          font-style: oblique 8deg; line-height: 1.4; text-decoration: underline;
+                          page: cover\">all of them</div>
+             <p>a <span style=\"color: blue; font-weight: bold; text-align: center\">span</span></p>
+             <img style=\"width: 50%; height: auto; max-width: none; margin: 0 4px\" src=\"a.png\">
+             <div style=\"display: none; background: red\"><ul><li>hidden</li></ul></div>",
+        );
+        assert_eq!(blocks.len(), 5, "{blocks:?}");
+    }
+
+    #[test]
+    fn b_and_strong_are_bolder_than_their_parent() {
+        let blocks =
+            parse_body("<h1>A <strong>B</strong></h1><p style=\"font-weight: 300\">c <b>d</b></p>");
+        let weight_of = |block: &Block, text: &str| {
+            let p = paragraph(block);
+            p.spans
+                .iter()
+                .find(|s| &p.text[s.range.clone()] == text)
+                .unwrap()
+                .style
+                .font_weight
+        };
+        assert_eq!(
+            weight_of(&blocks[0], "B"),
+            900.0,
+            "bolder than a bold heading"
+        );
+        assert_eq!(weight_of(&blocks[1], "d"), 400.0, "bolder than light text");
+    }
+
+    #[test]
+    fn style_attribute_keywords_match_in_any_case() {
+        use crate::style::{FontStyle, TextAlign};
+        let blocks = parse_body(
+            "<p STYLE=\"Text-Align: Center; FONT-STYLE: Italic; Font-Weight: BOLD\">x</p>
+             <span style=\"DISPLAY: Block\">y</span>",
+        );
+        let p = paragraph(&blocks[0]);
+        assert_eq!(p.style.text_align, TextAlign::Center);
+        assert_eq!(p.style.text.font_style, FontStyle::Italic);
+        assert_eq!(p.style.text.font_weight, 700.0);
+        assert_eq!(blocks.len(), 2, "the span is a block: {blocks:?}");
     }
 
     #[test]

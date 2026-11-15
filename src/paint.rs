@@ -11,7 +11,7 @@ use krilla::geom::{PathBuilder, Point, Rect, Size, Transform};
 use krilla::image::Image;
 use krilla::metadata::Metadata;
 use krilla::page::PageSettings;
-use krilla::paint::Fill;
+use krilla::paint::{Fill, LineJoin, Paint, Stroke};
 use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use krilla::Document;
@@ -108,10 +108,14 @@ fn fill_rect(surface: &mut Surface<'_>, left: f32, top: f32, width: f32, height:
     surface.draw_path(&path);
 }
 
-fn fill(color: Rgb) -> Fill {
+fn paint_of(color: Rgb) -> Paint {
     let Rgb(r, g, b) = color;
+    rgb::Color::new(r, g, b).into()
+}
+
+fn fill(color: Rgb) -> Fill {
     Fill {
-        paint: rgb::Color::new(r, g, b).into(),
+        paint: paint_of(color),
         ..Fill::default()
     }
 }
@@ -124,13 +128,47 @@ pub(crate) struct TextRun {
     pub colour: Rgb,
     /// (offset below the baseline, thickness, width) when underlined.
     pub underline: Option<(f32, f32, f32)>,
+    /// fontique found no face of the family close enough to the weight asked for: the nearest is
+    /// more than 200 lighter (`bold` on a regular-only family, but not `600`), so the glyphs are
+    /// thickened with a stroke, as browsers synthesize bold (`font-synthesis: weight`).
+    pub embolden: bool,
+    /// Italic or oblique was asked for and the family has no such face, so the glyphs are
+    /// slanted by this many degrees, as browsers synthesize italics (`font-synthesis: style`).
+    pub skew: Option<f32>,
     pub glyphs: Vec<KrillaGlyph>,
 }
 
 impl TextRun {
+    /// Stroke width of a synthesized bold, as a fraction of the font size.
+    pub(crate) const EMBOLDEN: f32 = 1.0 / 24.0;
+
     fn draw(&self, surface: &mut Surface<'_>, font: Font, text: &str) {
         surface.set_fill(Some(fill(self.colour)));
+        if self.embolden {
+            surface.set_stroke(Some(Stroke {
+                paint: paint_of(self.colour),
+                width: self.font_size * Self::EMBOLDEN,
+                line_join: LineJoin::Round,
+                ..Stroke::default()
+            }));
+        }
+        if let Some(degrees) = self.skew {
+            // Slant around the baseline: a point `h` above it moves `h·tan` to the right.
+            let tan = degrees.to_radians().tan();
+            surface.push_transform(&Transform::from_row(
+                1.0,
+                0.0,
+                -tan,
+                1.0,
+                tan * self.origin.y,
+                0.0,
+            ));
+        }
         surface.draw_glyphs(self.origin, &self.glyphs, font, text, self.font_size, false);
+        if self.skew.is_some() {
+            surface.pop();
+        }
+        surface.set_stroke(None);
         if let Some((offset, thickness, width)) = self.underline {
             fill_rect(
                 surface,
@@ -162,6 +200,8 @@ pub(crate) fn text_runs(paragraph: &ParagraphLayout, placed: &PlacedLine) -> Vec
         // parley's underline offset is y-up from the baseline (negative below it); the top of
         // the stroke sits at that offset.
         let (offset, thickness) = (-metrics.underline_offset, metrics.underline_size.max(0.5));
+        let embolden = run.synthesis().embolden();
+        let skew = run.synthesis().skew();
         let clusters: Vec<_> = run.visual_clusters().collect();
         let mut current: Option<TextRun> = None;
 
@@ -178,6 +218,8 @@ pub(crate) fn text_runs(paragraph: &ParagraphLayout, placed: &PlacedLine) -> Vec
                 font_size,
                 colour: brush.color,
                 underline: brush.underline.then_some((offset, thickness, 0.0)),
+                embolden,
+                skew,
                 glyphs: Vec::new(),
             });
             let text_range = glyph_text_range(&clusters, index);
@@ -265,7 +307,146 @@ impl ImageCache<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::tests::{fixture, lay_out};
+    use crate::layout::tests::{fixture, font, font_file, lay_out, lay_out_with_fonts};
+
+    const FACES: [&str; 4] = ["Regular", "Bold", "Italic", "BoldItalic"];
+
+    fn faces(names: &[&str]) -> Vec<Vec<u8>> {
+        names
+            .iter()
+            .map(|name| match *name {
+                "Regular" => font(),
+                name => font_file(&format!("DejaVuSerif-{name}.ttf")),
+            })
+            .collect()
+    }
+
+    /// (text, face it is drawn with, emboldened, slanted) for every run of a fixture laid out
+    /// with the given faces.
+    fn face_runs(
+        fixture_name: &str,
+        registered: &[&str],
+    ) -> Vec<(String, &'static str, bool, bool)> {
+        let all = faces(&FACES);
+        let document = lay_out_with_fonts(&fixture(fixture_name), &[], &faces(registered));
+        document
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .flat_map(|placed| {
+                let paragraph = &document.paragraphs[placed.paragraph];
+                text_runs(paragraph, placed).into_iter().map(|run| {
+                    let start = run.glyphs.first().unwrap().text_range.start;
+                    let end = run.glyphs.last().unwrap().text_range.end;
+                    let text = paragraph.text[start..end].trim().to_string();
+                    let face = FACES[all
+                        .iter()
+                        .position(|bytes| run.font.data.as_ref() == bytes.as_slice())
+                        .expect("a registered face")];
+                    (text, face, run.embolden, run.skew.is_some())
+                })
+            })
+            .filter(|(text, ..)| !text.is_empty())
+            .collect()
+    }
+
+    fn as_strs<'a>(
+        runs: &'a [(String, &'static str, bool, bool)],
+    ) -> Vec<(&'a str, &'a str, bool, bool)> {
+        runs.iter()
+            .map(|(t, f, e, s)| (t.as_str(), *f, *e, *s))
+            .collect()
+    }
+
+    #[test]
+    fn bold_text_uses_the_bold_face_when_it_is_registered() {
+        let runs = face_runs("bold.html", &["Regular", "Bold"]);
+        assert_eq!(
+            as_strs(&runs),
+            [
+                ("A bold heading", "Bold", false, false),
+                ("Plain text with", "Regular", false, false),
+                ("bold", "Bold", false, false),
+                ("and", "Regular", false, false),
+                ("strong", "Bold", false, false),
+                ("words.", "Regular", false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn bold_text_is_synthesized_without_a_bold_face() {
+        let runs = face_runs("bold.html", &["Regular"]);
+        assert_eq!(
+            as_strs(&runs),
+            [
+                ("A bold heading", "Regular", true, false),
+                ("Plain text with", "Regular", false, false),
+                ("bold", "Regular", true, false),
+                ("and", "Regular", false, false),
+                ("strong", "Regular", true, false),
+                ("words.", "Regular", false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn italic_text_uses_the_italic_faces_when_they_are_registered() {
+        let runs = face_runs("italic.html", &FACES);
+        assert_eq!(
+            as_strs(&runs),
+            [
+                ("Plain", "Regular", false, false),
+                ("emphasis", "Italic", false, false),
+                ("and", "Regular", false, false),
+                ("italic", "Italic", false, false),
+                ("and", "Regular", false, false),
+                ("bold italic", "BoldItalic", false, false),
+                ("with an", "Regular", false, false),
+                ("underlined", "Italic", false, false),
+                ("link.", "Regular", false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn italic_text_is_synthesized_without_italic_faces() {
+        let runs = face_runs("italic.html", &["Regular", "Bold"]);
+        assert_eq!(
+            as_strs(&runs),
+            [
+                ("Plain", "Regular", false, false),
+                ("emphasis", "Regular", false, true),
+                ("and", "Regular", false, false),
+                ("italic", "Regular", false, true),
+                ("and", "Regular", false, false),
+                ("bold italic", "Bold", false, true),
+                ("with an", "Regular", false, false),
+                ("underlined", "Regular", false, true),
+                ("link.", "Regular", false, false),
+            ]
+        );
+        let runs = face_runs("italic.html", &["Regular"]);
+        assert!(
+            runs.iter()
+                .any(|(t, _, embolden, skewed)| t == "bold italic" && *embolden && *skewed),
+            "bold italic with the regular face only is both emboldened and slanted"
+        );
+    }
+
+    #[test]
+    fn a_synthesized_italic_keeps_its_underline_straight_under_the_text() {
+        let document = lay_out_with_fonts(&fixture("italic.html"), &[], &faces(&["Regular"]));
+        let page = &document.pages[0];
+        let area = &page.links[0];
+        let placed = page.lines.iter().find(|l| l.top == area.top).unwrap();
+        let runs = text_runs(&document.paragraphs[placed.paragraph], placed);
+        let link = runs.iter().find(|r| r.underline.is_some()).unwrap();
+        assert!(link.skew.is_some());
+        let (_, _, width) = link.underline.unwrap();
+        assert!((link.origin.x - area.left).abs() < 0.01);
+        assert!((link.origin.x + width - area.right).abs() < 0.01);
+    }
 
     /// Every byte of every line's text must be claimed by some glyph, in order, with no gaps or
     /// overlaps, so PDF text extraction reproduces the source text exactly.
@@ -308,6 +489,37 @@ mod tests {
             ligatures > 0,
             "the fixture should exercise at least one ligature"
         );
+    }
+
+    /// The PDF places glyphs by their advances alone, so those must carry the justified spacing:
+    /// runs meet end to end, and a stretched line's last letter lands on the right margin.
+    #[test]
+    fn justified_glyphs_reach_the_right_margin_in_the_pdf() {
+        let document = lay_out(&fixture("text-align.html"));
+        let right_margin = 419.53 - 40.0;
+        let mut at_margin = 0;
+        for placed in &document.pages[0].lines {
+            let paragraph = &document.paragraphs[placed.paragraph];
+            let runs = text_runs(paragraph, placed);
+            let mut last_ink = 0.0;
+            for (index, run) in runs.iter().enumerate() {
+                let mut x = run.origin.x;
+                for glyph in &run.glyphs {
+                    x += glyph.x_advance * run.font_size;
+                    if !paragraph.text[glyph.text_range.clone()].trim().is_empty() {
+                        last_ink = x;
+                    }
+                }
+                if let Some(next) = runs.get(index + 1) {
+                    assert!((x - next.origin.x).abs() < 0.01, "runs meet end to end");
+                }
+            }
+            if (last_ink - right_margin).abs() < 0.01 {
+                at_margin += 1;
+            }
+        }
+        // Two right-aligned lines plus the stretched lines of the justified paragraphs.
+        assert!(at_margin >= 6, "{at_margin} lines end at the right margin");
     }
 
     #[test]

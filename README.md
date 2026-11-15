@@ -13,9 +13,10 @@ system font scanning: output depends only on the HTML and the fonts and images y
 
 **Status: early.** CSS support grows from real documents, one feature at a time. Supported so far:
 
-- CSS from `<style>` elements: element, class, id and compound selectors (`img.img-fluid`) with
-  specificity and inheritance; `font-family`, `font-size`, `font-weight`, `color`,
-  `text-decoration`, `line-height`, `margin`, `padding`, `width`, `height`, `max-width`, `page`.
+- CSS from `<style>` elements and `style` attributes: element, class, id and compound selectors
+  (`img.img-fluid`) with specificity and inheritance; `font-family`, `font-size`, `font-weight`,
+  `font-style`, `color`, `text-decoration`, `text-align` (including `justify`), `line-height`,
+  `margin`, `padding`, `width`, `height`, `max-width`, `page`.
 - Block layout with collapsing vertical margins; paragraphs split across pages between any two
   lines.
 - Clickable `<a href>` links, including links that wrap across lines.
@@ -25,12 +26,19 @@ system font scanning: output depends only on the HTML and the fonts and images y
   rule, and an empty one still creates its page, which makes full-bleed covers easy.
 
 - Elements: `html`, `body`, `div`, `section`, `article`, `header`, `footer`, `main`, `nav`,
-  `aside`, `p`, `h1`, `h2`, `span`, `a`, `img`, and `br` for line breaks.
+  `aside`, `p`, `h1`–`h6`, `span`, `a`, `b`, `strong`, `i`, `em`, `img`, and `br` for line breaks.
+- Bold (`font-weight`, `<b>`, `<strong>`, headings) and italic (`font-style: italic | oblique`,
+  `<i>`, `<em>`) draw with the matching face of the family when one is configured. Without one,
+  they are synthesized as browsers do: bold by thickening the glyphs with a stroke, italic by
+  slanting them. Fonts must be static TTF/OTF files, one per weight and style; a variable font
+  draws its default instance only.
 
-Any other displayed element (`<ul>`, `<strong>`, `<table>`, ...), and the `style`,
-`align`, `width`, `height` and `dir` attributes, fail the render with `Error::Unsupported` naming
+Any other displayed element (`<ul>`, `<table>`, `<u>`, ...), and the `align`,
+`width`, `height` and `dir` attributes, fail the render with `Error::Unsupported` naming
 them, so a document never comes out silently wrong. Hidden elements (`display: none`, such as
-`<head>` and `<script>`) are skipped. Unsupported CSS in stylesheets is ignored.
+`<head>` and `<script>`) are skipped. A `style` attribute declaration the crate can't render
+(`display: flex`, `background-color`, a percentage margin) fails the render too, naming it;
+unsupported CSS in `<style>` elements is ignored.
 
 ## Installation
 
@@ -38,7 +46,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-lifetivation-pdf = "0.1"
+lifetivation-pdf = "0.2"
 ```
 
 ## Usage

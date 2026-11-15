@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    @page { size: A5; margin: 40pt }
+    body { margin: 0; font-size: 16px; line-height: 20pt }
+    p { margin: 0 0 10pt }
+    .center { text-align: center }
+    .right { text-align: right }
+    .justify { text-align: justify }
+</style>
+</head>
+<body>
+<p>Start-aligned by default.</p>
+<p class="center">A centred line.</p>
+<p class="right">A right-aligned line.</p>
+<div class="center"><p>Centred by inheritance.</p></div>
+<p style="text-align: right">Right-aligned by a style attribute.</p>
+<p class="justify">A justified paragraph spreads the words of every full line across the whole width, so both edges of the text block line up with the margins.<br>A line that ends in a break is not stretched, and the text after it is justified again until the paragraph's last line, which keeps its natural spacing.</p>
+<p class="justify">Justified <a href="https://example.com/justified">links stay clickable where their stretched words are drawn</a> on every line of the paragraph.</p>
+</body>
+</html>

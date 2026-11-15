@@ -15,7 +15,13 @@ body { margin: 8px }
 p { margin: 1em 0 }
 h1 { font-size: 2em; margin: 0.67em 0; font-weight: bold }
 h2 { font-size: 1.5em; margin: 0.83em 0; font-weight: bold }
+h3 { font-size: 1.17em; margin: 1em 0; font-weight: bold }
+h4 { margin: 1.33em 0; font-weight: bold }
+h5 { font-size: 0.83em; margin: 1.67em 0; font-weight: bold }
+h6 { font-size: 0.67em; margin: 2.33em 0; font-weight: bold }
 a { color: #0000ee; text-decoration: underline }
+b, strong { font-weight: bolder }
+i, em { font-style: italic }
 ";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +29,8 @@ pub(crate) struct Declaration {
     /// Lowercased property name.
     pub name: String,
     pub value: String,
+    /// Marked `!important`.
+    pub important: bool,
 }
 
 /// A compound selector: optional type, ids and classes, all of which must match.
@@ -79,7 +87,7 @@ impl Selector {
     }
 }
 
-fn is_ident(text: &str) -> bool {
+pub(crate) fn is_ident(text: &str) -> bool {
     !text.is_empty()
         && text
             .chars()
@@ -198,8 +206,7 @@ fn matching_brace(text: &str, open: usize) -> usize {
     text.len()
 }
 
-/// Declarations of a block body. Nested blocks (margin boxes inside `@page`) are skipped;
-/// `!important` is accepted and ignored.
+/// Declarations of a block body. Nested blocks (margin boxes inside `@page`) are skipped.
 pub(crate) fn declarations(body: &str) -> Vec<Declaration> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -210,11 +217,20 @@ pub(crate) fn declarations(body: &str) -> Vec<Declaration> {
     let push = |text: &str, out: &mut Vec<Declaration>| {
         if let Some((name, value)) = text.split_once(':') {
             let name = name.trim().to_ascii_lowercase();
-            let value = value.trim().trim_end_matches("!important").trim();
+            let mut value = value.trim();
+            // `! important`, in any case, ends the value.
+            let important = value.rfind('!').is_some_and(|bang| {
+                let flagged = value[bang + 1..].trim().eq_ignore_ascii_case("important");
+                if flagged {
+                    value = value[..bang].trim();
+                }
+                flagged
+            });
             if is_ident(&name) && !value.is_empty() {
                 out.push(Declaration {
                     name,
                     value: value.to_string(),
+                    important,
                 });
             }
         }
@@ -256,27 +272,50 @@ pub(crate) fn declarations(body: &str) -> Vec<Declaration> {
 /// Declared values for one element, after the cascade: name → value.
 pub(crate) type Specified = HashMap<String, String>;
 
-/// Applies the matching rules of each sheet in order (user agent first, then author), each sheet
-/// sorted by specificity with source order breaking ties.
+/// The CSS cascade for one element. `sheets` run from the user agent to the author; `inline` is
+/// its `style` attribute. Within a sheet, rules apply by specificity, then source order. Later
+/// steps override earlier ones:
+///
+/// 1. normal declarations, sheet by sheet, then the `style` attribute's;
+/// 2. `!important` ones in reverse: the author sheet, the `style` attribute, then the user agent.
 pub(crate) fn cascade(
     sheets: &[&Stylesheet],
     tag: &str,
     id: Option<&str>,
     classes: &[&str],
+    inline: &[Declaration],
 ) -> Specified {
+    let matching: Vec<Vec<&Declaration>> = sheets
+        .iter()
+        .map(|sheet| {
+            let mut rules: Vec<(usize, &StyleRule)> = sheet
+                .rules
+                .iter()
+                .enumerate()
+                .filter(|(_, rule)| rule.selector.matches(tag, id, classes))
+                .collect();
+            rules.sort_by_key(|(order, rule)| (rule.selector.specificity(), *order));
+            rules
+                .into_iter()
+                .flat_map(|(_, rule)| &rule.declarations)
+                .collect()
+        })
+        .collect();
     let mut specified = Specified::new();
-    for sheet in sheets {
-        let mut matching: Vec<(usize, &StyleRule)> = sheet
-            .rules
-            .iter()
-            .enumerate()
-            .filter(|(_, rule)| rule.selector.matches(tag, id, classes))
-            .collect();
-        matching.sort_by_key(|(order, rule)| (rule.selector.specificity(), *order));
-        for (_, rule) in matching {
-            for declaration in &rule.declarations {
-                expand(declaration, &mut specified);
-            }
+    let mut apply = |declarations: &[&Declaration], important: bool| {
+        for declaration in declarations.iter().filter(|d| d.important == important) {
+            expand(declaration, &mut specified);
+        }
+    };
+    let inline: Vec<&Declaration> = inline.iter().collect();
+    for sheet in &matching {
+        apply(sheet, false);
+    }
+    apply(&inline, false);
+    for (index, sheet) in matching.iter().enumerate().rev() {
+        apply(sheet, true);
+        if index + 1 == matching.len() {
+            apply(&inline, true);
         }
     }
     specified
@@ -428,7 +467,7 @@ mod tests {
         let author = Stylesheet::parse(
             "a.x { color: green } a, .green { color: #95C552 } a { text-decoration: none; margin: 1px 2px }",
         );
-        let specified = cascade(&[&ua, &author], "a", None, &["x", "green"]);
+        let specified = cascade(&[&ua, &author], "a", None, &["x", "green"], &[]);
         assert_eq!(specified["color"], "green", "a.x outranks a and .green");
         assert_eq!(
             specified["text-decoration"], "none",
@@ -436,6 +475,44 @@ mod tests {
         );
         assert_eq!(specified["margin-left"], "2px");
         assert_eq!(specified["margin-bottom"], "1px");
+    }
+
+    #[test]
+    fn important_declarations_outrank_the_style_attribute_in_cascade_order() {
+        let ua = Stylesheet::parse("p { color: black; margin: 1px !important }");
+        let author = Stylesheet::parse(
+            "#x { color: green } p { color: red ! IMPORTANT; font-size: 9px !important;
+             line-height: 2 !important; margin: 5px }",
+        );
+        let inline = declarations("color: blue; font-size: 20px !important; line-height: 3");
+        assert!(inline[1].important && inline[1].value == "20px");
+        let specified = cascade(&[&ua, &author], "p", Some("x"), &[], &inline);
+        assert_eq!(
+            specified["color"], "red",
+            "author !important beats the style attribute"
+        );
+        assert_eq!(
+            specified["font-size"], "20px",
+            "!important in the style attribute beats author !important"
+        );
+        assert_eq!(specified["line-height"], "2");
+        assert_eq!(
+            specified["margin-top"], "1px",
+            "user-agent !important beats everything"
+        );
+        let plain = cascade(
+            &[&ua, &author],
+            "p",
+            Some("x"),
+            &[],
+            &declarations("color: blue"),
+        );
+        assert_eq!(plain["color"], "red");
+        let normal = cascade(&[&ua], "p", None, &[], &declarations("color: blue"));
+        assert_eq!(
+            normal["color"], "blue",
+            "the style attribute beats normal rules"
+        );
     }
 
     #[test]
